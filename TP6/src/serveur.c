@@ -18,7 +18,10 @@
 #include "serveur.h"
 int socketfd;
 
-int visualize_plot()
+#define MAX_COULEURS 30
+#define TAILLE_VALEUR 32
+
+int visualize_plot(void)
 {
   const char *browser = "firefox";
 
@@ -39,21 +42,103 @@ int visualize_plot()
   return 0;
 }
 
+static int extraire_code(const char *json, char *code, size_t taille)
+{
+  const char *position = strstr(json, "\"code\"");
+  if (!position)
+  {
+    return 0;
+  }
+  position = strchr(position, ':');
+  if (!position)
+  {
+    return 0;
+  }
+  position++;
+  while (*position && *position != '"')
+  {
+    ++position;
+  }
+  if (*position != '"')
+  {
+    return 0;
+  }
+  ++position;
+  size_t len = 0;
+  while (*position && *position != '"' && len + 1 < taille)
+  {
+    code[len++] = *position++;
+  }
+  code[len] = '\0';
+  return 1;
+}
+
+static int extraire_valeurs(const char *json, char valeurs[][TAILLE_VALEUR], size_t max_valeurs)
+{
+  const char *section = strstr(json, "\"valeurs\"");
+  if (!section)
+  {
+    return 0;
+  }
+  const char *p = strchr(section, '[');
+  if (!p)
+  {
+    return 0;
+  }
+  ++p;
+  size_t compte = 0;
+  while (*p && *p != ']' && compte < max_valeurs)
+  {
+    while (*p && (*p == ' ' || *p == ','))
+    {
+      ++p;
+    }
+    if (*p != '"')
+    {
+      ++p;
+      continue;
+    }
+    ++p;
+    size_t len = 0;
+    while (*p && *p != '"' && len + 1 < TAILLE_VALEUR)
+    {
+      valeurs[compte][len++] = *p++;
+    }
+    valeurs[compte][len] = '\0';
+    if (*p == '"')
+    {
+      ++p;
+    }
+    ++compte;
+  }
+  return (int)compte;
+}
+
+static void construire_json_reponse(const char *code, const char *valeurs[], size_t nb_valeurs, char *dest, size_t taille)
+{
+  size_t offset = 0;
+  offset += snprintf(dest + offset, taille - offset, "{\"code\":\"%s\",\"valeurs\":[", code);
+  for (size_t i = 0; i < nb_valeurs; ++i)
+  {
+    offset += snprintf(dest + offset, taille - offset, "\"%s\"%s", valeurs[i], (i + 1 == nb_valeurs) ? "]}" : ",");
+    if (offset >= taille)
+    {
+      break;
+    }
+  }
+}
+
 double degreesToRadians(double degrees)
 {
   return degrees * M_PI / 180.0;
 }
 
-int plot(char *data)
+int plot(char couleurs[][TAILLE_VALEUR], int nb_couleurs)
 {
-  int i;
-  char *saveptr = NULL;
-  char *str = data;
-  char *token = strtok_r(str, ",", &saveptr);
-  const int num_colors = 10;
-
-  double angles[num_colors];
-  memset(angles, 0, sizeof(angles));
+  if (nb_couleurs <= 0)
+  {
+    return 0;
+  }
 
   FILE *svg_file = fopen(svg_file_path, "w");
   if (svg_file == NULL)
@@ -69,23 +154,12 @@ int plot(char *data)
   double center_x = 200.0;
   double center_y = 200.0;
   double radius = 150.0;
-
   double start_angle = -90.0;
+  double angle_par_section = 360.0 / nb_couleurs;
 
-  str = NULL;
-  i = 0;
-  while (1)
+  for (int i = 0; i < nb_couleurs; ++i)
   {
-    token = strtok_r(str, ",", &saveptr);
-    if (token == NULL)
-    {
-      break;
-    }
-    str = NULL;
-    angles[i] = 360.0 / num_colors;
-
-    double end_angle = start_angle + angles[i];
-
+    double end_angle = start_angle + angle_par_section;
     double start_angle_rad = degreesToRadians(start_angle);
     double end_angle_rad = degreesToRadians(end_angle);
 
@@ -95,16 +169,13 @@ int plot(char *data)
     double y2 = center_y + radius * sin(end_angle_rad);
 
     fprintf(svg_file, "  <path d=\"M%.2f,%.2f A%.2f,%.2f 0 0,1 %.2f,%.2f L%.2f,%.2f Z\" fill=\"%s\" />\n",
-            x1, y1, radius, radius, x2, y2, center_x, center_y, token);
+            x1, y1, radius, radius, x2, y2, center_x, center_y, couleurs[i]);
 
     start_angle = end_angle;
-    i++;
   }
 
   fprintf(svg_file, "</svg>\n");
-
   fclose(svg_file);
-
   visualize_plot();
   return 0;
 }
@@ -129,37 +200,77 @@ int renvoie_message(int client_socket_fd, char *data)
  */
 int recois_envoie_message(int client_socket_fd, char data[1024])
 {
-  /*
-   * extraire le code des données envoyées par le client.
-   * Les données envoyées par le client peuvent commencer par le mot "message :" ou un autre mot.
-   */
-  printf("Message recu: %s\n", data);
-  char code[10];
-  sscanf(data, "%s", code);
-
-  // Si le message commence par le mot: 'message:'
-  if (strcmp(code, "message:") == 0)
+  char code[32];
+  if (!extraire_code(data, code, sizeof(code)))
   {
-    renvoie_message(client_socket_fd, data);
-  }
-  else
-  {
-    plot(data);
+    fprintf(stderr, "Message JSON invalide\n");
+    return EXIT_FAILURE;
   }
 
-  return (EXIT_SUCCESS);
+  if (strcmp(code, "message") == 0)
+  {
+    char valeurs[1][TAILLE_VALEUR];
+    int nb = extraire_valeurs(data, valeurs, 1);
+    if (nb > 0)
+    {
+      printf("Message recu: %s\n", valeurs[0]);
+    }
+
+    char reponse[512];
+    printf("Reponse serveur: ");
+    if (!fgets(reponse, sizeof(reponse), stdin))
+    {
+      return EXIT_FAILURE;
+    }
+    size_t len = strlen(reponse);
+    if (len > 0 && reponse[len - 1] == '\n')
+    {
+      reponse[len - 1] = '\0';
+    }
+
+    const char *valeurs_reponse[] = {reponse};
+    char json[1024];
+    construire_json_reponse("message", valeurs_reponse, 1, json, sizeof(json));
+    return renvoie_message(client_socket_fd, json);
+  }
+
+  if (strcmp(code, "couleurs") == 0)
+  {
+    char valeurs[MAX_COULEURS + 1][TAILLE_VALEUR];
+    int total = extraire_valeurs(data, valeurs, MAX_COULEURS + 1);
+    if (total < 2)
+    {
+      fprintf(stderr, "Couleurs insuffisantes recues\n");
+      return EXIT_FAILURE;
+    }
+    int nb_couleurs = atoi(valeurs[0]);
+    if (nb_couleurs > total - 1)
+    {
+      nb_couleurs = total - 1;
+    }
+    if (nb_couleurs > MAX_COULEURS)
+    {
+      nb_couleurs = MAX_COULEURS;
+    }
+    plot(&valeurs[1], nb_couleurs);
+    return EXIT_SUCCESS;
+  }
+
+  fprintf(stderr, "Code inconnu: %s\n", code);
+  return EXIT_FAILURE;
 }
 
 // Fonction de gestion du signal Ctrl+C
 void gestionnaire_ctrl_c(int signal)
 {
+  (void)signal;
   printf("\nSignal Ctrl+C capturé. Sortie du programme.\n");
   // fermer le socket
   close(socketfd);
   exit(0); // Quitter proprement le programme.
 }
 
-int main()
+int main(void)
 {
   int bind_status;
 
