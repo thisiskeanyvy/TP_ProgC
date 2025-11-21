@@ -14,7 +14,6 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
-#include <sys/epoll.h>
 #include <unistd.h>
 
 #include "serveur.h"
@@ -33,11 +32,62 @@ int renvoie_message(int client_socket_fd, char *data)
 
   if (data_size < 0)
   {
-    perror("Erreur d'écriture");
+    perror("Erreur d'ecriture");
     return EXIT_FAILURE;
   }
 
   return EXIT_SUCCESS;
+}
+
+static int effectuer_calcul(char operateur, long premier, long second, long *resultat)
+{
+  switch (operateur)
+  {
+  case '+':
+    *resultat = premier + second;
+    return 1;
+  case '-':
+    *resultat = premier - second;
+    return 1;
+  case '*':
+    *resultat = premier * second;
+    return 1;
+  case '/':
+    if (second == 0)
+      return 0;
+    *resultat = premier / second;
+    return 1;
+  case '%':
+    if (second == 0)
+      return 0;
+    *resultat = premier % second;
+    return 1;
+  default:
+    return 0;
+  }
+}
+
+int recois_numeros_calcule(int client_socket_fd, const char *message)
+{
+  char operateur = 0;
+  long premier = 0;
+  long second = 0;
+  if (sscanf(message, "calcule : %c %ld %ld", &operateur, &premier, &second) < 3)
+  {
+    char erreur[] = "calcule : erreur format";
+    return renvoie_message(client_socket_fd, erreur);
+  }
+
+  long resultat = 0;
+  if (!effectuer_calcul(operateur, premier, second, &resultat))
+  {
+    char erreur[] = "calcule : erreur operation";
+    return renvoie_message(client_socket_fd, erreur);
+  }
+
+  char reponse[128];
+  snprintf(reponse, sizeof(reponse), "calcule : %ld", resultat);
+  return renvoie_message(client_socket_fd, reponse);
 }
 
 /**
@@ -49,17 +99,27 @@ int renvoie_message(int client_socket_fd, char *data)
  */
 int recois_envoie_message(int client_socket_fd, char *data)
 {
-  printf("Message reçu: %s\n", data);
-  char code[10];
-  if (sscanf(data, "%9s:", code) == 1) // Assurez-vous que le format est correct
+  printf("Message recu: %s\n", data);
+
+  if (strncmp(data, "calcule :", 9) == 0)
   {
-    if (strcmp(code, "message:") == 0)
-    {
-      return renvoie_message(client_socket_fd, data);
-    }
+    return recois_numeros_calcule(client_socket_fd, data);
   }
 
-  return (EXIT_SUCCESS);
+  if (strncmp(data, "message:", 8) == 0)
+  {
+    char reponse[1024];
+    printf("Reponse serveur (max 1000 caracteres): ");
+    if (!fgets(reponse, sizeof(reponse), stdin))
+    {
+      return EXIT_FAILURE;
+    }
+    char buffer[1200];
+    snprintf(buffer, sizeof(buffer), "message: %s", reponse);
+    return renvoie_message(client_socket_fd, buffer);
+  }
+
+  return renvoie_message(client_socket_fd, data);
 }
 
 /**
@@ -68,6 +128,7 @@ int recois_envoie_message(int client_socket_fd, char *data)
  */
 void gestionnaire_ctrl_c(int signal)
 {
+  (void)signal;
   printf("\nSignal Ctrl+C capturé. Sortie du programme.\n");
 
   // Fermer le socket si ouvert
@@ -122,7 +183,7 @@ void gerer_client(int client_socket_fd)
  * Configuration du serveur socket et attente de connexions.
  */
 
-int main()
+int main(void)
 {
 
   int bind_status;                // Statut de la liaison
